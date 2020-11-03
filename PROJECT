@@ -1,0 +1,7 @@
+domain: tmaxcloud.com
+repo: github.com/tmax-cloud/console-operator
+resources:
+- group: hypercloud
+  kind: Console
+  version: v1
+version: "2"
