@@ -29,7 +29,7 @@ type ConsoleSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	App ConsoleApp `json:"app,omitempty"`
+	App ConsoleApp `json:"app"`
 }
 
 type ConsoleApp struct {
@@ -37,9 +37,9 @@ type ConsoleApp struct {
 	Tag        string `json:"tag,omitempty"`
 
 	// +optional
-	// +kubebuilder:default=1
-	//+ kubebuilder:valdation:Minimum=0
-	Replicas    int32              `json:"replicas,omitempty"`
+	Replicas int32 `json:"replicas,omitempty"`
+	// +optional
+	// +kubebuilder:default:NodePort
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 }
 
@@ -48,25 +48,18 @@ type ConsoleStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// //A list of pointers to currently running consoles.
-	// // +optional
-	// Active []corev1.ObjectReference `json:"active,omitempty"`
-
-	// // Information when was the last time the job was successfully scheduled.
-	// // +optional
-	// LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
-
 	// The name of the service created by Service Object
 	//+optional
 	LeaderService string `json:"leaderService"`
+	ConsoleStatus string `json:"consoleStatus"`
+	Address       string `json:"address"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:JSONPath=".status.leaderService",name="Service",type="string"
-// +kubebuilder:printcolumn:JSONPath=".status.leaderService",name="Service",type="string"
-// +kubebuilder:printcolumn:JSONPath=".spec.relicas",name="Desired",type="integer"
-
+// +kubebuilder:printcolumn:JSONPath=".status.leaderService",name="SERVICE",type="string"
+// +kubebuilder:printcolumn:JSONPath=".status.consoleStatus",name="STATUS",type="string"
+// +kubebuilder:printcolumn:JSONPath=".status.address",name="ADDRESS",type="string"
 // Console is the Schema for the consoles API
 type Console struct {
 	metav1.TypeMeta   `json:",inline"`

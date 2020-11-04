@@ -8,7 +8,7 @@
 apiVersion: hypercloud.tmaxcloud.com/v1
 kind: Console
 metadata:
-  name: console-kube-v27
+  name: console-v22
 spec:
   app: 
     repository: "tmaxcloudck/hypercloud-console"

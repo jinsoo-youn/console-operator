@@ -86,6 +86,7 @@ func (r *ConsoleReconciler) jobForTls(console *hypercloudv1.Console) *batchv1.Jo
 
 func (r *ConsoleReconciler) serviceAccount(console *hypercloudv1.Console) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "ServiceAccount"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      console.Name,
 			Namespace: console.Namespace,
@@ -95,6 +96,7 @@ func (r *ConsoleReconciler) serviceAccount(console *hypercloudv1.Console) *corev
 
 func (r *ConsoleReconciler) clusterRole(console *hypercloudv1.Console) *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      console.Name,
 			Namespace: console.Namespace,
@@ -111,6 +113,7 @@ func (r *ConsoleReconciler) clusterRole(console *hypercloudv1.Console) *rbacv1.C
 
 func (r *ConsoleReconciler) clusterRoleBinding(console *hypercloudv1.Console) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "RoleBinding"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      console.Name,
 			Namespace: console.Namespace,
@@ -128,6 +131,102 @@ func (r *ConsoleReconciler) clusterRoleBinding(console *hypercloudv1.Console) *r
 			APIGroup: "rbac.authorization.k8s.io",
 		},
 	}
+}
+
+func (r *ConsoleReconciler) desiredServiceAccount(console hypercloudv1.Console) (corev1.ServiceAccount, error) {
+	sa := corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "ServiceAccount"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      console.Name,
+			Namespace: console.Namespace,
+		},
+	}
+	if err := ctrl.SetControllerReference(&console, &sa, r.Scheme); err != nil {
+		return sa, err
+	}
+	return sa, nil
+}
+
+func (r *ConsoleReconciler) desiredJob(console hypercloudv1.Console) (batchv1.Job, error) {
+	// secretConsoleName := console.Name + "-https-secret"
+	bo := bool(true)
+	in := int64(2000)
+	delTime := int32(100)
+	job := batchv1.Job{
+		TypeMeta: metav1.TypeMeta{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      console.Name,
+			Namespace: console.Namespace,
+		},
+		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: &delTime,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: console.Name,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						corev1.Container{
+							Name:            "create",
+							Image:           "docker.io/jettech/kube-webhook-certgen:v1.3.0",
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args: []string{
+								"create",
+								"--host=console,console.$(POD_NAMESPACE).svc",
+								"--namespace=$(POD_NAMESPACE)",
+								"--secret-name=" + console.Name + "-https-secret",
+							},
+							Env: []corev1.EnvVar{
+								corev1.EnvVar{
+									Name: "POD_NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.namespace",
+										},
+									},
+								},
+							},
+						},
+					},
+					RestartPolicy:      corev1.RestartPolicyNever,
+					ServiceAccountName: console.Name,
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &bo,
+						RunAsUser:    &in,
+					},
+				},
+			},
+		},
+	}
+	if err := ctrl.SetControllerReference(&console, &job, r.Scheme); err != nil {
+		return job, err
+	}
+	return job, nil
+
+}
+
+func (r *ConsoleReconciler) desiredService(console hypercloudv1.Console) (corev1.Service, error) {
+	svc := corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "Service"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      console.Name,
+			Namespace: console.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal,
+			Ports: []corev1.ServicePort{
+				{Name: "https", Port: 433, Protocol: "TCP", TargetPort: intstr.FromInt(6433)},
+			},
+			Selector: map[string]string{"console": console.Name},
+			Type:     console.Spec.App.ServiceType,
+		},
+	}
+
+	// always set the controller reference so that we know which object owns this.
+	if err := ctrl.SetControllerReference(&console, &svc, r.Scheme); err != nil {
+		return svc, err
+	}
+	return svc, nil
 }
 
 func (r *ConsoleReconciler) service(console *hypercloudv1.Console) *corev1.Service {
@@ -155,6 +254,76 @@ func (r *ConsoleReconciler) service(console *hypercloudv1.Console) *corev1.Servi
 		},
 	}
 	return consoleSvc
+}
+
+func (r *ConsoleReconciler) desiredDeployment(console hypercloudv1.Console) (appsv1.Deployment, error) {
+	depl := appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "Deployment"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      console.Name,
+			Namespace: console.Namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &console.Spec.App.Replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"console": console.Name},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"console": console.Name},
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: console.Name,
+					Containers: []corev1.Container{
+						{
+							Name:            console.Name,
+							Image:           console.Spec.App.Repository + ":" + console.Spec.App.Tag,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command: []string{
+								"/opt/bridge/bin/bridge",
+								"--public-dir=/opt/bridge/static",
+								"--listen=https://0.0.0.0:6443",
+								"--base-address=https://0.0.0.0:6443",
+								"--tls-cert-file=/var/https-cert/cert",
+								"--tls-key-file=/var/https-cert/key",
+								"--user-auth=disabled",
+							},
+							Ports: []corev1.ContainerPort{
+								corev1.ContainerPort{
+									ContainerPort: 6443,
+									Protocol:      "TCP",
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								corev1.VolumeMount{
+									MountPath: "/var/https-cert",
+									Name:      "https-cert",
+									ReadOnly:  true,
+								},
+							},
+							TerminationMessagePath:   "/dev/termination-log",
+							TerminationMessagePolicy: "File",
+						},
+					},
+					Volumes: []corev1.Volume{
+						corev1.Volume{
+							Name: "https-cert",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: console.Name + "-https-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(&console, &depl, r.Scheme); err != nil {
+		return depl, err
+	}
+	return depl, nil
 }
 
 func (r *ConsoleReconciler) deployment(console *hypercloudv1.Console) *appsv1.Deployment {
@@ -212,7 +381,7 @@ func (r *ConsoleReconciler) deployment(console *hypercloudv1.Console) *appsv1.De
 	dep := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
-			APIVersion: "v1",
+			APIVersion: appsv1.SchemeGroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      console.Name,
