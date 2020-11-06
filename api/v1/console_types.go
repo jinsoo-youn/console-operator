@@ -39,7 +39,6 @@ type ConsoleApp struct {
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 	// +optional
-	// +kubebuilder:default:NodePort
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 }
 
@@ -48,18 +47,22 @@ type ConsoleStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// The name of the service created by Service Object
+	// Service Type
 	//+optional
-	LeaderService string `json:"leaderService"`
-	ConsoleStatus string `json:"consoleStatus"`
-	Address       string `json:"address"`
+	TYPE string `json:"type"`
+	// Console Status
+	// +optional
+	STATUS string `json:"status"`
+	//url that can access the console UI
+	//+optional
+	URL string `json:"url"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:JSONPath=".status.leaderService",name="SERVICE",type="string"
-// +kubebuilder:printcolumn:JSONPath=".status.consoleStatus",name="STATUS",type="string"
-// +kubebuilder:printcolumn:JSONPath=".status.address",name="ADDRESS",type="string"
+// +kubebuilder:printcolumn:JSONPath=".status.status",name="STATUS",type="string"
+// +kubebuilder:printcolumn:JSONPath=".status.type",name="TYPE",type="string"
+// +kubebuilder:printcolumn:JSONPath=".status.url",name="URL",type="string"
 // Console is the Schema for the consoles API
 type Console struct {
 	metav1.TypeMeta   `json:",inline"`

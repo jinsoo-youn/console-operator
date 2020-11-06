@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,6 +56,18 @@ func (r *ConsoleReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 
 	var console hypercloudv1.Console
 	if err := r.Get(ctx, req.NamespacedName, &console); err != nil {
+		log.Info("Unable to fetch Console", "Error", err)
+
+		// Delete Cr,Crb
+		var crb rbacv1.ClusterRoleBinding
+		if err := r.Get(ctx, client.ObjectKey{Name: req.Name}, &crb); err == nil {
+			return r.removeCrb(ctx, &crb, log)
+		}
+		var cr rbacv1.ClusterRole
+		if err := r.Get(ctx, client.ObjectKey{Name: req.Name}, &cr); err == nil {
+			return r.removeCr(ctx, &cr, log)
+		}
+
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -65,17 +78,28 @@ func (r *ConsoleReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, err
 	}
 
+	cr, err := r.desiredClusterRole(console)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	crb, err := r.desiredClusterRoleBinding(console)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	job, err := r.desiredJob(console)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
+	log.Info("verify", "spec", job.Spec)
 	depl, err := r.desiredDeployment(console)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info(depl.Spec.Selector.DeepCopy().String())
+	log.Info(depl.Spec.Selector.String())
 
 	svc, err := r.desiredService(console)
 	if err != nil {
@@ -83,177 +107,84 @@ func (r *ConsoleReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("console-controller")}
-	r.Create(ctx, &sa)
-	r.Create(ctx, &job)
 
-	if err := r.Patch(ctx, &depl, client.Apply, applyOpts...); err != nil {
-		return ctrl.Result{}, err
+	if err := r.Patch(ctx, &sa, client.Apply, applyOpts...); err != nil {
+		log.Error(err, "error is occur when sa")
+		sa := &corev1.ServiceAccount{}
+		r.Get(ctx, req.NamespacedName, sa)
+		return r.removeSa(ctx, sa, log)
 	}
+
+	// if err := r.Create(ctx, &cr, client.Apply, applyOpts...); err != nil {
+	if err := r.Update(ctx, &cr); err != nil {
+		log.Error(err, "error is occure when cr")
+		cr := &rbacv1.ClusterRole{}
+		r.Get(ctx, client.ObjectKey{Name: req.Name}, cr)
+		return r.removeCr(ctx, cr, log)
+	}
+
+	// if err := r.Patch(ctx, &crb, client.Apply, applyOpts...); err != nil {
+	if err := r.Update(ctx, &crb); err != nil {
+		log.Error(err, "error is occure when crb")
+		crb := &rbacv1.ClusterRoleBinding{}
+		r.Get(ctx, client.ObjectKey{Name: req.Name}, crb)
+		return r.removeCrb(ctx, crb, log)
+	}
+
+	err = r.Patch(ctx, &job, client.Apply, applyOpts...)
+	if err != nil {
+		log.Error(err, "error is occur when job")
+		job := &batchv1.Job{}
+		r.Get(ctx, req.NamespacedName, job)
+		return r.removeJob(ctx, job, log)
+	}
+
 	if err := r.Patch(ctx, &svc, client.Apply, applyOpts...); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.Patch(ctx, &depl, client.Apply, applyOpts...); err != nil {
+		depl := &appsv1.Deployment{}
+		r.Get(ctx, req.NamespacedName, depl)
+		return r.removeDeployment(ctx, depl, log)
+	}
 
-	// console.Status.LeaderService = svc.Spec.Ports[0].NodePort
 	var serviceAddr string
 	checkSvc := &corev1.Service{}
 	r.Get(ctx, req.NamespacedName, checkSvc)
-	console.Status.LeaderService = string(checkSvc.Spec.Type)
+	// r.getUrl(ctx, *checkSvc, lolg)
+	// console.Status.LeaderService = string(checkSvc.Spec.Type)
 	if checkSvc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		console.Status.TYPE = string(corev1.ServiceTypeLoadBalancer)
+		if checkSvc.Status.LoadBalancer.Ingress == nil || len(checkSvc.Status.LoadBalancer.Ingress) == 0 {
+			serviceAddr = "Undefined"
+		}
 		serviceAddr = "https://" + checkSvc.Status.LoadBalancer.Ingress[0].IP
 	} else {
+		console.Status.TYPE = string(corev1.ServiceTypeNodePort)
+		if checkSvc.Spec.Ports == nil || len(checkSvc.Spec.Ports) == 0 {
+			serviceAddr = "Undefined"
+		}
 		serviceAddr = "https://<NodeIP>:" + strconv.Itoa(int(checkSvc.Spec.Ports[0].NodePort))
-
 	}
-	console.Status.Address = serviceAddr
+	console.Status.URL = serviceAddr
+	log.Info(console.Status.TYPE)
+	log.Info(console.Status.STATUS)
 
 	checkDepl := &appsv1.Deployment{}
 	r.Get(ctx, req.NamespacedName, checkDepl)
-	if checkDepl.Status.Conditions[0].Type == appsv1.DeploymentAvailable {
-		console.Status.ConsoleStatus = "Ready"
+	if checkDepl.Status.Conditions != nil && len(checkDepl.Status.Conditions) != 0 {
+		if checkDepl.Status.Conditions[0].Type == appsv1.DeploymentAvailable {
+			console.Status.STATUS = "Ready"
+		} else {
+			console.Status.STATUS = "Failed"
+		}
 	} else {
-		console.Status.ConsoleStatus = "Failed"
+		console.Status.STATUS = "Undefined"
 	}
-	err = r.Status().Update(ctx, &console)
-	tempJob := &batchv1.Job{}
-	r.Get(ctx, req.NamespacedName, tempJob)
-	log.Info(tempJob.Status.String())
-	temp := &appsv1.Deployment{}
-	r.Get(ctx, req.NamespacedName, temp)
-	log.Info(temp.Spec.String())
-	tempSvc := &corev1.Service{}
-	r.Get(ctx, req.NamespacedName, tempSvc)
-	log.Info(tempSvc.Spec.ClusterIP)
-	// applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("console-controller")}
+	log.Info(console.Status.STATUS)
 
-	// // Define the desired ServiceAccount object
-	// consoleSa := r.serviceAccount(&console)
-	// //Check if the ServiceAccount already exists
-	// foundSa := &corev1.ServiceAccount{}
-	// log.Info("Checking ServiceAccount")
-	// if err := r.Get(ctx, types.NamespacedName{Name: console.Name, Namespace: console.Namespace}, foundSa); err != nil && errors.IsNotFound(err) {
-	// 	log.Info("ServiceAccount does not exist, Creating ServiceAccount")
-	// 	if err := r.Patch(ctx, consoleSa, client.Apply, applyOpts...); err != nil {
-	// 		log.Info("Unable to create console ServiceAccount")
-	// 		return ctrl.Result{}, err
-	// 	} else {
-	// 		log.Info("Success to create console sa")
-	// 		return ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, nil
-	// 	}
-	// 	// log.Info("Creating ServiceAccount is successed")
-	// } else if err != nil {
-	// 	log.Info("Failed to Get console Service account")
-	// 	return ctrl.Result{}, err
-	// }
-	// log.Info("ServiceAccount confirmed")
+	r.Status().Update(ctx, &console)
 
-	// // Define the desired ClusterRole object
-	// consoleCr := r.clusterRole(&console)
-	// // if err := controllerutil.SetControllerReference(console, consoleCr, r.Scheme); err != nil {
-	// // 	return ctrl.Result{}, err
-	// // }
-	// // Check if the ClusterRole already exists
-	// foundCr := &rbacv1.ClusterRole{}
-	// log.Info("Checking ClusterRole")
-	// if err := r.Get(ctx, client.ObjectKey{Name: consoleCr.Name}, foundCr); err != nil && errors.IsNotFound(err) {
-	// 	log.Info("ClusterRole does not exist, Creating ClusterRole")
-	// 	if err := r.Patch(ctx, consoleCr, client.Apply, applyOpts...); err != nil {
-	// 		log.Info("Unable to create console ClusterRole")
-	// 		return ctrl.Result{}, err
-	// 	} else {
-	// 		log.Info("Creating ClusterRole is successed")
-	// 		return ctrl.Result{Requeue: true, RequeueAfter: 3 * time.Second}, nil
-	// 	}
-	// } else if err != nil {
-	// 	log.Info("Failed to Get console ClusterRole")
-	// 	return ctrl.Result{Requeue: false}, err
-	// }
-	// log.Info("clusterRole confirmed")
-
-	// //Define the desired ClusterRoleBinding object
-	// consoleCrb := r.clusterRoleBinding(&console)
-	// // if err := controllerutil.SetControllerReference(console, consoleCrb, r.Scheme); err != nil {
-	// // 	return ctrl.Result{}, err
-	// // }
-	// // Check if the ClusterRoleBinding already exists
-	// foundCrb := &rbacv1.ClusterRoleBinding{}
-	// log.Info("Checking ClusterRoleBinding")
-	// // if err := r.Get(ctx, client.ObjectKey{Name: consoleCrb.Name}, foundCrb); err != nil && errors.IsNotFound(err) {
-	// if err := r.Get(ctx, client.ObjectKey{Name: consoleCr.Name}, foundCrb); err != nil && errors.IsNotFound(err) {
-	// 	log.Info("ClusterRoleBinding does not exist, Creating ClusterRoleBinding")
-	// 	if err := r.Patch(ctx, consoleCrb, client.Apply, applyOpts...); err != nil && errors.IsAlreadyExists(err) {
-
-	// 		log.Info("Unable to create console ClusterRoleBinding")
-	// 	} else {
-	// 		log.Info("Creating ClusterRoleBinding is successed")
-	// 		return ctrl.Result{Requeue: true, RequeueAfter: 3 * time.Second}, nil
-	// 	}
-	// } else if err != nil {
-	// 	log.Info("Failed to Get console ClusterRoleBinding")
-	// 	return ctrl.Result{Requeue: false}, err
-	// }
-	// log.Info("ClusterRoleBinding confirmed")
-
-	// //Define the desired Job for creating tls certification
-	// consoleJob := r.jobForTls(&console)
-	// if err := controllerutil.SetControllerReference(&console, consoleJob, r.Scheme); err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-	//Check if the Job already exists
-	// foundJob := &batchv1.Job{}
-	// log.Info("Checking Job")
-	// if err := r.Get(ctx, types.NamespacedName{Name: consoleJob.Name, Namespace: consoleJob.Namespace}, foundJob); err != nil && errors.IsNotFound(err) {
-	// 	log.Info("Job for tls does not exist, Creating Job for tls")
-	// 	if err := r.Patch(ctx, consoleJob, client.Apply, applyOpts...); err != nil {
-
-	// 		log.Info("Unable to create console Job")
-	// 		return ctrl.Result{}, err
-	// 	} else {
-	// 		log.Info("Success to create console Job")
-	// 		return ctrl.Result{Requeue: true, RequeueAfter: 3 * time.Second}, nil
-	// 	}
-	// } else if err != nil {
-	// 	log.Info("Failed to get console Job")
-	// 	return ctrl.Result{}, err
-	// }
-	// log.Info("Job confirmed")
-
-	// Manage Job
-	// job, err := r.desiredJob(console)
-	// if err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-
-	// // Manage Deployment
-	// deployment, err := r.desiredDeployment(console)
-	// if err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-
-	// svc, err := r.desiredService(console)
-	// if err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-
-	// applyOpts = []client.PatchOption{client.ForceOwnership, client.FieldOwner("console-controller")}
-	// // if err := r.Patch(ctx, &job, client.Apply, applyOpts...); err != nil {
-	// // 	return ctrl.Result{}, err
-	// // }
-	// // if _, err := ctrl.CreateOrUpdate(ctx, r.Client, &deployment, func() error {
-	// // 	return nil
-	// // }); err != nil {
-	// // 	return ctrl.Result{}, err
-	// // }
-
-	// if err := r.Patch(ctx, &deployment, client.Apply, applyOpts...); err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-
-	// if err := r.Patch(ctx, &svc, client.Apply, applyOpts...); err != nil {
-	// 	return ctrl.Result{}, err
-	// }
-	// console.Status.LeaderService = svc.Spec.Ports[0].NodePort
-	// console.Spec.App.Replicas = *deployment.Spec.Replicas
-	// err = r.Status().Update(ctx, &console)
 	log.Info("reconciled console")
 	return ctrl.Result{}, nil
 }
@@ -267,7 +198,6 @@ func (r *ConsoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&hypercloudv1.Console{}).
-		// Owns(&corev1.ServiceAccount{}).
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).

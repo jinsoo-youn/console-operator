@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *ConsoleReconciler) jobForTls(console *hypercloudv1.Console) *batchv1.Job {
@@ -147,6 +148,51 @@ func (r *ConsoleReconciler) desiredServiceAccount(console hypercloudv1.Console) 
 	return sa, nil
 }
 
+func (r *ConsoleReconciler) desiredClusterRole(console hypercloudv1.Console) (rbacv1.ClusterRole, error) {
+	cr := rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: console.Name,
+		},
+		Rules: []rbacv1.PolicyRule{
+			rbacv1.PolicyRule{
+				APIGroups: []string{"*"},
+				Resources: []string{"*"},
+				Verbs:     []string{"*"},
+			},
+		},
+	}
+	// if err := ctrl.SetControllerReference(&console, &cr, r.Scheme); err != nil {
+	// 	return cr, err
+	// }
+	return cr, nil
+}
+
+func (r *ConsoleReconciler) desiredClusterRoleBinding(console hypercloudv1.Console) (rbacv1.ClusterRoleBinding, error) {
+	crb := rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "RoleBinding"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: console.Name,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      console.Name,
+				Namespace: console.Namespace,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     console.Name,
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+	// if err := ctrl.SetControllerReference(&console, &crb, r.Scheme); err != nil {
+	// 	return crb, err
+	// }
+	return crb, nil
+}
+
 func (r *ConsoleReconciler) desiredJob(console hypercloudv1.Console) (batchv1.Job, error) {
 	// secretConsoleName := console.Name + "-https-secret"
 	bo := bool(true)
@@ -227,33 +273,6 @@ func (r *ConsoleReconciler) desiredService(console hypercloudv1.Console) (corev1
 		return svc, err
 	}
 	return svc, nil
-}
-
-func (r *ConsoleReconciler) service(console *hypercloudv1.Console) *corev1.Service {
-	p := make([]corev1.ServicePort, 0)
-	servicePort := corev1.ServicePort{
-		Name:       "tcp-port",
-		Port:       433,
-		TargetPort: intstr.FromInt(6433),
-	}
-	p = append(p, servicePort)
-	consoleSvc := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      console.Name,
-			Namespace: console.Namespace,
-			Labels:    map[string]string{"app": console.Name},
-		},
-		Spec: corev1.ServiceSpec{
-			Ports:    p,
-			Type:     console.Spec.App.ServiceType,
-			Selector: map[string]string{"app": console.Name},
-		},
-	}
-	return consoleSvc
 }
 
 func (r *ConsoleReconciler) desiredDeployment(console hypercloudv1.Console) (appsv1.Deployment, error) {
@@ -408,7 +427,7 @@ func (r *ConsoleReconciler) removeDeployment(ctx context.Context, deplmtToRemove
 		return ctrl.Result{}, err
 	}
 	log.V(1).Info("Removed console deployment for console run")
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 // RemoveService deletes the service from the cluster.
@@ -419,7 +438,7 @@ func (r *ConsoleReconciler) removeService(ctx context.Context, serviceToRemove *
 		return ctrl.Result{}, err
 	}
 	log.V(1).Info("Removed console service for console run")
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 func (r *ConsoleReconciler) removeJob(ctx context.Context, jobToRemove *batchv1.Job, log logr.Logger) (ctrl.Result, error) {
@@ -429,5 +448,66 @@ func (r *ConsoleReconciler) removeJob(ctx context.Context, jobToRemove *batchv1.
 		return ctrl.Result{}, err
 	}
 	log.V(1).Info("Removed console job for console tls")
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
+
+func (r *ConsoleReconciler) removeSa(ctx context.Context, saToRemove *corev1.ServiceAccount, log logr.Logger) (ctrl.Result, error) {
+	if err := r.Delete(ctx, saToRemove); err != nil {
+		log.Error(err, "unable to delete console sa for console")
+		return ctrl.Result{}, err
+	}
+	log.Info("Removed console sa for console")
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+}
+
+func (r *ConsoleReconciler) removeCr(ctx context.Context, crToRemove *rbacv1.ClusterRole, log logr.Logger) (ctrl.Result, error) {
+	if err := r.Delete(ctx, crToRemove); err != nil {
+		log.Error(err, "unable to delete console cr for console")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	log.Info("Removed console cr for console")
+	return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+}
+func (r *ConsoleReconciler) removeCrb(ctx context.Context, crbToRemove *rbacv1.ClusterRoleBinding, log logr.Logger) (ctrl.Result, error) {
+	if err := r.Delete(ctx, crbToRemove); err != nil {
+		log.Error(err, "unable to delete console crb for console")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	log.Info("Removed console crb for console")
+	return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+}
+
+// func (r *ConsoleReconciler) getUrl(ctx, checkSvc corev1.Service, console hypercloudv1.Console, log logr.Logger) error {
+// 	// console.Status.LeaderService = string(checkSvc.Spec.Type)
+// 	var serviceAddr string
+// 	if checkSvc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+// 		console.Status.TYPE = string(corev1.ServiceTypeLoadBalancer)
+// 		if checkSvc.Status.LoadBalancer.Ingress == nil || len(checkSvc.Status.LoadBalancer.Ingress) == 0 {
+// 			serviceAddr = "Undefined"
+// 		}
+// 		serviceAddr = "https://" + checkSvc.Status.LoadBalancer.Ingress[0].IP
+// 	} else {
+// 		console.Status.TYPE = string(corev1.ServiceTypeNodePort)
+// 		if checkSvc.Spec.Ports == nil || len(checkSvc.Spec.Ports) == 0 {
+// 			serviceAddr = "Undefined"
+// 		}
+// 		serviceAddr = "https://<NodeIP>:" + strconv.Itoa(int(checkSvc.Spec.Ports[0].NodePort))
+// 	}
+// 	console.Status.URL = serviceAddr
+// // }
+
+// func (r *ConsoleReconciler) urlForService(svc corev1.Service, port int32) string {
+
+// 	// notice that we unset this if it's not present -- we always want the
+// 	// state to reflect what we observe.
+// 	if len(svc.Status.LoadBalancer.Ingress) == 0 {
+// 		return ""
+// 	}
+
+// 	host := svc.Status.LoadBalancer.Ingress[0].Hostnam=e
+// 	if host == "" {
+// 		host = svc.Status.LoadBalancer.Ingress[0].IP
+// 	}
+
+// 	return fmt.Sprintf("http://%s", net.JoinHostPort(host, fmt.Sprintf("%v", port)))
+// }
